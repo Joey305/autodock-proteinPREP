@@ -17,7 +17,6 @@ A lightweight, interactive tool to prep protein receptors for **AutoDock Vina**.
 
 ```
 3a_PDB2PDBQTbatch.py        # main interactive prep tool
-4A_PARSEvinascores.py       # (optional) your downstream parser
 AutoDockTools_py3/          # vendored ADT (Python 3 port)
 Receptors/                  # example inputs (PDB + CIF mixed)
 Receptors-Copy/             # tiny example set
