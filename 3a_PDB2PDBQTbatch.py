@@ -2,73 +2,201 @@
 # -*- coding: utf-8 -*-
 
 """
-3a_PDB2PDBQTbatch.py
-Interactive receptor prep for AutoDock Vina with:
-- PDB + mmCIF input support
-- True-HET detection (ligands/ions/waters/sugars)
-- Optional chain removal (batch or per-file)
-- AltLoc collapse to a single conformation per atom
-- Conversion to PDBQT via Meeko / ADT_py3 / legacy MGLTools
-- FINAL OUTPUT: **only .pdbqt** files (always)
+autodock-proteinPREP — receptor prep for AutoDock Vina (interactive + headless)
 
-Requires: gemmi  (pip install gemmi)
-Optional: meeko  (pip install meeko)
-Optional: ADT_py3 (pip install -e ./AutoDockTools_py3 OR pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3)
+FEATURES
+- Reads PDB / mmCIF
+- Lists only true HET groups (ligands/ions/waters/sugars)
+- Optional chain removal
+- AltLoc collapse (highest occupancy, tie: ' ' > 'A' > lexicographic)
+- Converts to PDBQT using first available backend:
+    1) Meeko (mk_prepare_receptor.py)
+    2) AutoDockTools_py3 (installed module)
+    3) AutoDockTools_py3 (local checkout ./AutoDockTools_py3)
+    4) Legacy MGLTools (prepare_receptor4.py on PATH)
+- FINAL OUTPUT: PDBQT-only (sweeps non-.pdbqt files from output dir by default)
+
+USAGE (INTERACTIVE)
+    python 3a_PDB2PDBQTbatch.py
+    # Follow the prompts (same heads-up display as before)
+
+USAGE (HEADLESS / AUTOMATION)
+    # Batch mode, remove all HETs, keep all chains, PDBQT-only (defaults)
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --headless
+
+    # Batch mode, remove specific HET codes, remove chains B,C
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --headless \
+        --mode batch \
+        --remove-het HOH,EDO,SO4 \
+        --remove-chains B,C
+
+    # Batch mode, pick HETs by aggregated INDICES from a scan (after scanning)
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --headless \
+        --mode batch \
+        --remove-het-indices 1,3,5
+
+    # Per-file headless via JSON config (filenames relative to --folder)
+    # config.json:
+    # {
+    #   "7hg9.cif": {"remove_het": "all", "remove_chains": ["A","C"]},
+    #   "8BB2_cleaned.pdb": {"remove_het": ["HOH","EDO"], "remove_chains": []}
+    # }
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --headless \
+        --mode per-file \
+        --per-file-config config.json
+
+    # Limit to a subset of files
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --files 7hg9.cif 8BB2_cleaned.pdb \
+        --headless
+
+    # Choose backend explicitly (auto/meeko/adt/mgl), change altloc policy,
+    # and allow non-PDBQT artifacts (summary / clean PDBs)
+    python 3a_PDB2PDBQTbatch.py \
+        --folder Receptors \
+        --headless \
+        --backend meeko \
+        --altloc collapse \
+        --no-pdbqt-only \
+        --write-summary \
+        --keep-clean-pdb
+
+ARGUMENTS (most useful)
+  --folder FOLDER               Input folder containing .pdb/.cif
+  --files F1 [F2 ...]           Optional subset of files to process (relative to folder)
+  --headless                    Run without prompts (see defaults below)
+  --mode {batch,per-file}       Headless mode selection (default: batch)
+  --remove-het ALL|CODES        Comma list (e.g. HOH,EDO,SO4) or 'all' (default in headless: all)
+  --remove-het-indices IDS      Comma list of indices from aggregated HET scan (batch only)
+  --remove-chains IDS           Comma list of chain IDs (e.g. A,B). Default headless: none
+  --per-file-config JSON        JSON mapping filename -> {remove_het, remove_chains}
+  --backend {auto,meeko,adt,mgl}Backend preference (default: auto)
+  --altloc {collapse,all}       AltLoc policy (default: collapse)
+  --output-dir PATH             Output directory (default: <folder>_PDBQT_Converted)
+  --pdbqt-only / --no-pdbqt-only  Keep only .pdbqt files (default: on)
+  --write-summary               Write HET summary (only if not PDBQT-only)
+  --keep-clean-pdb              Save cleaned PDBs (only if not PDBQT-only)
+
+HEADLESS DEFAULTS (when --headless is used)
+  mode=batch, remove_het=all, remove_chains=none, pdbqt_only=True
+
+REQUIREMENTS
+  pip install gemmi
+  (optional) pip install meeko
+  (optional) pip install -e ./AutoDockTools_py3
 """
 
 import os
 import sys
+import json
 import shutil
 import subprocess
-from collections import Counter, defaultdict
+import argparse
 import importlib.util
+from collections import Counter, defaultdict
 
-# =============== Global policy ===============
-# Always keep ONLY .pdbqt files in the final output directory
-ALWAYS_PDBQT_ONLY = True
-
-# =============== Dependencies ===============
+# =========================
+# Dependencies
+# =========================
 try:
     import gemmi
 except ImportError:
     print("❌ Requires 'gemmi'. Install with: pip install gemmi")
     sys.exit(1)
 
-# =============== Helpers: module presence & backends ===============
+# =========================
+# Arg parsing
+# =========================
+def parse_args():
+    p = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Prep PDB/mmCIF receptors and convert to PDBQT (interactive or headless)."
+    )
+    p.add_argument("--folder", type=str, help="Folder containing receptor structures")
+    p.add_argument("--files", nargs="+", help="Subset of files to process (relative to --folder)")
+
+    p.add_argument("--headless", action="store_true", help="Run without prompts")
+    p.add_argument("--mode", choices=["batch", "per-file"], default="batch", help="Headless selection mode")
+
+    het = p.add_mutually_exclusive_group()
+    het.add_argument("--remove-het", type=str, help="Comma-separated 3-letter codes or 'all'")
+    het.add_argument("--remove-het-indices", type=str, help="Comma-separated indices from aggregated HET scan (batch only)")
+
+    p.add_argument("--remove-chains", type=str, help="Comma-separated chain IDs (e.g. A,B)")
+    p.add_argument("--per-file-config", type=str, help="JSON config: filename->{remove_het, remove_chains}")
+
+    p.add_argument("--backend", choices=["auto", "meeko", "adt", "mgl"], default="auto", help="Backend preference")
+    p.add_argument("--altloc", choices=["collapse", "all"], default="collapse", help="AltLoc handling")
+
+    p.add_argument("--output-dir", type=str, help="Output directory name")
+
+    pdbqt = p.add_mutually_exclusive_group()
+    pdbqt.add_argument("--pdbqt-only", dest="pdbqt_only", action="store_true", help="Keep only .pdbqt in final folder")
+    pdbqt.add_argument("--no-pdbqt-only", dest="pdbqt_only", action="store_false", help="Allow non-.pdbqt artifacts")
+    p.set_defaults(pdbqt_only=True)
+
+    p.add_argument("--write-summary", action="store_true", help="Write HET summary (suppressed if --pdbqt-only)")
+    p.add_argument("--keep-clean-pdb", action="store_true", help="Keep cleaned PDBs (suppressed if --pdbqt-only)")
+
+    return p.parse_args()
+
+# =========================
+# Backend resolution
+# =========================
 def has_module(modname: str) -> bool:
     return importlib.util.find_spec(modname) is not None
 
-def resolve_receptor_preparer():
+def resolve_receptor_preparer(prefer="auto"):
     """
     Returns (kind, base_cmd_list, extra_env_or_None)
     kind ∈ {'meeko','adt_module','adt_local','mgltools',None}
-    Priority:
-      1) Meeko (mk_prepare_receptor.py)
-      2) ADT_py3 installed as module
-      3) ADT_py3 local checkout in ./AutoDockTools_py3 (PYTHONPATH)
-      4) MGLTools legacy (prepare_receptor4.py on PATH)
     """
-    meeko = shutil.which("mk_prepare_receptor.py")
-    if meeko:
-        return "meeko", [meeko], None
+    def _meeko():
+        path = shutil.which("mk_prepare_receptor.py")
+        return ("meeko", [path], None) if path else (None, None, None)
 
-    if has_module("AutoDockTools.Utilities24.prepare_receptor4"):
-        return "adt_module", [sys.executable, "-m", "AutoDockTools.Utilities24.prepare_receptor4"], None
+    def _adt_module():
+        if has_module("AutoDockTools.Utilities24.prepare_receptor4"):
+            return ("adt_module", [sys.executable, "-m", "AutoDockTools.Utilities24.prepare_receptor4"], None)
+        return (None, None, None)
 
-    local_script = os.path.join("AutoDockTools_py3", "AutoDockTools", "Utilities24", "prepare_receptor4.py")
-    if os.path.exists(local_script):
-        env = os.environ.copy()
-        adt_root = os.path.abspath("AutoDockTools_py3")
-        env["PYTHONPATH"] = adt_root + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
-        return "adt_local", [sys.executable, local_script], env
+    def _adt_local():
+        local_script = os.path.join("AutoDockTools_py3", "AutoDockTools", "Utilities24", "prepare_receptor4.py")
+        if os.path.exists(local_script):
+            env = os.environ.copy()
+            adt_root = os.path.abspath("AutoDockTools_py3")
+            env["PYTHONPATH"] = adt_root + (os.pathsep + env.get("PYTHONPATH",""))
+            return ("adt_local", [sys.executable, local_script], env)
+        return (None, None, None)
 
-    mgl = shutil.which("prepare_receptor4.py")
-    if mgl:
-        return "mgltools", [mgl], None
+    def _mgl():
+        path = shutil.which("prepare_receptor4.py")
+        return ("mgltools", [path], None) if path else (None, None, None)
 
+    order_map = {
+        "auto":   [_meeko, _adt_module, _adt_local, _mgl],
+        "meeko":  [_meeko],
+        "adt":    [_adt_module, _adt_local],
+        "mgl":    [_mgl],
+    }
+    for fn in order_map.get(prefer, order_map["auto"]):
+        kind, base, env = fn()
+        if kind:
+            return kind, base, env
     return None, None, None
 
-# =============== Constants for HET classification ===============
+# =========================
+# HET / altloc / PDB writer
+# =========================
 STD_AA = {
     "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
     "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
@@ -76,9 +204,8 @@ STD_AA = {
 }
 STD_NT = {"A","C","G","T","U","I","DA","DC","DG","DT","DI","RA","RC","RG","RU"}
 WATER_NAMES = {"HOH","WAT","H2O"}
-COMMON_SUGARS = {"NAG","BMA","MAN","GAL","FUC","NDG"}  # treat as HET
+COMMON_SUGARS = {"NAG","BMA","MAN","GAL","FUC","NDG"}
 
-# =============== HET classification ===============
 def is_true_het(res: gemmi.Residue, chain=None) -> bool:
     name = res.name.strip().upper()
     if name in WATER_NAMES:
@@ -94,18 +221,11 @@ def is_true_het(res: gemmi.Residue, chain=None) -> bool:
         return True
     return False
 
-# =============== AltLoc policy ===============
 def iter_atoms_with_altloc_policy(res, policy="collapse"):
-    """
-    'collapse': choose a single atom per atom name using highest occupancy;
-                ties broken by altLoc ' ' then 'A' then lexicographic.
-    'all': yield all atoms (no filtering).
-    """
     if policy == "all":
         for a in res:
             yield a
         return
-
     groups = {}
     for a in res:
         key = a.name.strip()
@@ -122,12 +242,9 @@ def iter_atoms_with_altloc_policy(res, policy="collapse"):
     for a, _, _ in groups.values():
         yield a
 
-# =============== PDB writing (version-agnostic) ===============
 def format_atom_name(atom_name: str) -> str:
     n = atom_name.strip()
-    if len(n) >= 4:
-        return n[:4]
-    return f"{n:>4}"
+    return n[:4] if len(n) >= 4 else f"{n:>4}"
 
 def derive_element(atom) -> str:
     try:
@@ -143,17 +260,15 @@ def derive_element(atom) -> str:
         return letters[:2].title()
     return letters[0].upper()
 
-def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str):
+def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str, altloc_policy="collapse"):
     serial = 1
     lines = []
     wrote_any = False
-
-    for mi, model in enumerate(structure):
+    for model in structure:
         for chain in model:
             chain_id = (chain.name[:1] if chain.name else "A")
             chain_wrote = False
             last_resname, last_resseq, last_icode = "UNK", 0, " "
-
             for res in chain:
                 resname = res.name.strip().upper()
                 try:
@@ -162,7 +277,7 @@ def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str):
                 except Exception:
                     resseq, icode = 0, " "
                 record = "HETATM" if is_true_het(res, chain) else "ATOM  "
-                for atom in iter_atoms_with_altloc_policy(res, policy="collapse"):
+                for atom in iter_atoms_with_altloc_policy(res, policy=altloc_policy):
                     x, y, z = atom.pos.x, atom.pos.y, atom.pos.z
                     occ = getattr(atom, "occ", 1.00)
                     bfac = getattr(atom, "b_iso", 0.00)
@@ -184,38 +299,35 @@ def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str):
                     wrote_any = True
                     chain_wrote = True
                     last_resname, last_resseq, last_icode = resname, resseq, icode
-
             if chain_wrote:
                 ter = f"{'TER':<6}{serial:>5}      {last_resname:>3} {chain_id:1}{last_resseq:>4}{last_icode:1}"
                 lines.append(ter)
                 serial += 1
-
     lines.append("END")
     with open(out_pdb_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     if not wrote_any:
         raise RuntimeError("No atoms written — structure empty after filtering.")
 
-def write_pdb_compat(structure: gemmi.Structure, out_pdb_path: str):
-    if hasattr(gemmi, "write_minimal_pdb"):
+def write_pdb_compat(structure: gemmi.Structure, out_pdb_path: str, altloc_policy="collapse"):
+    if hasattr(gemmi, "write_minimal_pdb") and altloc_policy == "collapse":
         try:
             gemmi.write_minimal_pdb(structure, out_pdb_path)
             return
         except Exception:
             pass
-    pdb_write_manual(structure, out_pdb_path)
+    pdb_write_manual(structure, out_pdb_path, altloc_policy=altloc_policy)
 
-# =============== IO helpers ===============
+# =========================
+# IO / scanning helpers
+# =========================
 def read_structure(path: str) -> gemmi.Structure:
     return gemmi.read_structure(path)
 
 def is_cif_name(filename: str) -> bool:
-    ext = os.path.splitext(filename.lower())[1]
-    return ext in {".cif", ".mmcif"}
+    return os.path.splitext(filename.lower())[1] in {".cif", ".mmcif"}
 
-# =============== Scanning helpers ===============
 def scan_file_for_hets_and_chains(path: str):
-    """Return (Counter{name->count}, set(chains)) for a single file."""
     hets = Counter()
     chains = set()
     st = read_structure(path)
@@ -228,7 +340,6 @@ def scan_file_for_hets_and_chains(path: str):
     return hets, chains
 
 def scan_all(files, folder):
-    """Aggregate HETs across all files + chains per file."""
     het_counter = Counter()
     het_presence = defaultdict(set)
     chains_per_file = defaultdict(set)
@@ -244,8 +355,7 @@ def scan_all(files, folder):
             print(f"⚠️ Skipping {fname}: {e}")
     return het_counter, het_presence, chains_per_file
 
-# =============== Cleaning step ===============
-def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_drop):
+def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_drop, altloc_policy="collapse"):
     st = gemmi.read_structure(in_path)
     new_st = gemmi.Structure()
     new_st.cell = st.cell
@@ -270,41 +380,88 @@ def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_dr
         if len(new_model) > 0:
             new_st.add_model(new_model)
 
-    write_pdb_compat(new_st, out_pdb_path)
+    write_pdb_compat(new_st, out_pdb_path, altloc_policy=altloc_policy)
 
-# =============== Main ===============
+# =========================
+# Utilities
+# =========================
+def parse_csv_list(s):
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+def load_per_file_config(path):
+    with open(path, "r") as f:
+        cfg = json.load(f)
+    # Normalize: codes to upper, allow 'all'
+    norm = {}
+    for k, v in cfg.items():
+        rm_het = v.get("remove_het", [])
+        if isinstance(rm_het, str):
+            rm_het_norm = rm_het.strip().lower()
+            if rm_het_norm == "all":
+                rm_het = "all"
+            else:
+                rm_het = [x.strip().upper() for x in parse_csv_list(rm_het)]
+        else:
+            rm_het = [str(x).strip().upper() for x in rm_het]
+        rm_ch = [str(x).strip() for x in v.get("remove_chains", [])]
+        norm[k] = {"remove_het": rm_het, "remove_chains": rm_ch}
+    return norm
+
+# =========================
+# Main
+# =========================
 def main():
-    # list folders
-    print("\n📁 Available folders in current directory:")
-    folders = [f for f in os.listdir() if os.path.isdir(f)]
-    for i, folder in enumerate(folders, 1):
-        print(f"{i}. {folder}")
-    choice = input("🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): ")
-    try:
-        folder_index = int(choice) - 1
-        selected_folder = folders[folder_index]
-    except (ValueError, IndexError):
-        raise ValueError("❌ Invalid folder selection.")
+    args = parse_args()
 
-    # files
+    # Choose folder (interactive if not specified)
+    if not args.folder:
+        print("\n📁 Available folders in current directory:")
+        folders = [f for f in os.listdir() if os.path.isdir(f)]
+        for i, folder in enumerate(folders, 1):
+            print(f"{i}. {folder}")
+        choice = input("🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): ")
+        try:
+            folder_index = int(choice) - 1
+            folder = folders[folder_index]
+        except (ValueError, IndexError):
+            raise ValueError("❌ Invalid folder selection.")
+    else:
+        folder = args.folder
+
+    # Collect files
     valid_exts = {".pdb", ".ent", ".cif", ".mmcif"}
-    files = sorted(
-        f for f in os.listdir(selected_folder)
-        if os.path.isfile(os.path.join(selected_folder, f))
+    all_files = sorted(
+        f for f in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, f))
         and os.path.splitext(f.lower())[1] in valid_exts
     )
-    if not files:
+    if not all_files:
         print("❌ No .pdb / .cif / .mmcif files found in the selected folder.")
         sys.exit(1)
 
-    # Ask batch vs per-file if multiple
-    batch_mode = True
-    if len(files) > 1:
-        ans = input("\n🗂️ Multiple structures detected. Batch process with the SAME choices for all? [Y/n]: ").strip().lower()
-        batch_mode = (ans in ("", "y", "yes"))
+    if args.files:
+        # Validate subset
+        missing = [f for f in args.files if f not in all_files]
+        if missing:
+            print(f"❌ These files are not in {folder}: {', '.join(missing)}")
+            sys.exit(1)
+        files = sorted(args.files)
+    else:
+        files = all_files
 
-    # Resolve preparer
-    prep_kind, prep_base, prep_env = resolve_receptor_preparer()
+    # Interactive vs headless mode
+    interactive = not args.headless
+
+    # Head-up display: batch vs per-file (interactive path)
+    if interactive and len(files) > 1:
+        ans = input("\n🗂️ Multiple structures detected. Batch process with the SAME choices for all? [Y/n]: ").strip().lower()
+        mode = "batch" if ans in ("", "y", "yes") else "per-file"
+    else:
+        mode = args.mode  # headless default 'batch'
+
+    # Backend resolve
+    prefer = args.backend if args.backend else "auto"
+    prep_kind, prep_base, prep_env = resolve_receptor_preparer(prefer=prefer)
     if not prep_kind:
         raise RuntimeError(
             "No receptor preparer found. Install Meeko (`pip install meeko`) or ADT_py3 "
@@ -312,31 +469,32 @@ def main():
             "or ensure MGLTools' prepare_receptor4.py is on PATH."
         )
 
-    # Output / temp
-    output_dir = selected_folder + "_PDBQT_Converted"
+    # Output dirs
+    output_dir = args.output_dir if args.output_dir else (folder + "_PDBQT_Converted")
     os.makedirs(output_dir, exist_ok=True)
     temp_cleaned_dir = ".temp_cleaned_pdbs"
     os.makedirs(temp_cleaned_dir, exist_ok=True)
 
-    # Info banner
-    if ALWAYS_PDBQT_ONLY:
+    # Banner
+    if args.pdbqt_only:
         print("\n🧾 PDBQT-only mode: final output folder will contain ONLY .pdbqt files.\n")
 
-    # Gather choices
-    per_file_choices = {}
+    print(f"🔧 Using receptor preparer: {prep_kind}")
 
-    if batch_mode:
+    # Scan for HETs/chains
+    if mode == "batch":
         print(f"\n📦 Found {len(files)} structure file(s). Scanning for HET ligands/waters and chains...")
-        het_counter, het_presence, chains_per_file = scan_all(files, selected_folder)
-
+        het_counter, het_presence, chains_per_file = scan_all(files, folder)
         het_names_sorted = sorted(het_counter.items(), key=lambda x: (-x[1], x[0]))
+
+        # Display HUD in both interactive and headless (nice logs)
         print("\n🔎 HET (ligands/ions/waters) detected across all files:")
         if not het_names_sorted:
             print("  (none)")
         else:
             for idx, (name, count) in enumerate(het_names_sorted, 1):
-                files_here = sorted(het_presence[name])
-                print(f"  {idx:>3}. {name:<6} | count: {count:<4} | files: {', '.join(files_here)}")
+                files_here = ", ".join(sorted(het_presence[name]))
+                print(f"  {idx:>3}. {name:<6} | count: {count:<4} | files: {files_here}")
 
         print("\n🔗 Chains detected (per file):")
         for fname in files:
@@ -344,7 +502,7 @@ def main():
             print(f"  • {fname}: {', '.join(chs) if chs else '(none)'}")
 
         residues_to_remove = set()
-        if het_names_sorted:
+        if interactive and het_names_sorted:
             sel = input("\n🧽 Select HET indices to remove (e.g. 1,2,5) or 'all' to remove all shown. Leave blank to skip: ").strip().lower()
             if sel == "all":
                 residues_to_remove = {name for name, _ in het_names_sorted}
@@ -358,30 +516,82 @@ def main():
                             print(f"  ⚠️ Ignoring out-of-range index: {i}")
                 except ValueError:
                     print("  ⚠️ Invalid index list, skipping automatic HET removal.")
-
-        extra_res = input("➕ Enter any EXTRA 3-letter residue names to remove (comma-separated, optional): ").strip()
-        if extra_res:
-            residues_to_remove |= {r.strip().upper() for r in extra_res.split(",") if r.strip()}
-        if residues_to_remove:
-            print("🧼 Will remove HET residues (for all files):", ", ".join(sorted(residues_to_remove)))
         else:
-            print("ℹ️ No HET residue names selected for removal.")
+            # Headless defaults & flags
+            if args.remove_het_indices:
+                # Map indices to names from aggregated list
+                indices = []
+                try:
+                    indices = [int(x.strip()) for x in parse_csv_list(args.remove_het_indices)]
+                except ValueError:
+                    print("❌ --remove-het-indices must be integers")
+                    sys.exit(1)
+                for i in indices:
+                    if 1 <= i <= len(het_names_sorted):
+                        residues_to_remove.add(het_names_sorted[i-1][0])
+                    else:
+                        print(f"  ⚠️ Ignoring out-of-range index: {i}")
+            elif args.remove_het:
+                s = args.remove_het.strip().lower()
+                if s == "all":
+                    residues_to_remove = {name for name, _ in het_names_sorted} if het_names_sorted else set()
+                else:
+                    residues_to_remove = {x.upper() for x in parse_csv_list(args.remove_het)}
+            else:
+                # headless default: remove ALL HETs
+                residues_to_remove = {name for name, _ in het_names_sorted} if het_names_sorted else set()
 
-        chain_resp = input("🧩 Remove specific chains for ALL files? Enter chain IDs (comma-separated, leave blank to skip): ").strip()
-        chains_to_remove_global = {c.strip() for c in chain_resp.split(",") if c.strip()} if chain_resp else set()
-        if chains_to_remove_global:
-            print("✂️ Will remove chains (for all files):", ", ".join(sorted(chains_to_remove_global)))
+        if interactive:
+            extra_res = input("➕ Enter any EXTRA 3-letter residue names to remove (comma-separated, optional): ").strip()
+            if extra_res:
+                residues_to_remove |= {r.strip().upper() for r in extra_res.split(",") if r.strip()}
+            if residues_to_remove:
+                print("🧼 Will remove HET residues (for all files):", ", ".join(sorted(residues_to_remove)))
+            else:
+                print("ℹ️ No HET residue names selected for removal.")
+            chain_resp = input("🧩 Remove specific chains for ALL files? Enter chain IDs (comma-separated, leave blank to skip): ").strip()
+            chains_to_remove_global = {c.strip() for c in chain_resp.split(",") if c.strip()} if chain_resp else set()
+            if chains_to_remove_global:
+                print("✂️ Will remove chains (for all files):", ", ".join(sorted(chains_to_remove_global)))
+            else:
+                print("ℹ️ No chains selected for removal.")
         else:
-            print("ℹ️ No chains selected for removal.")
+            chains_to_remove_global = set(parse_csv_list(args.remove_chains)) if args.remove_chains else set()
+            if residues_to_remove:
+                print("🧼 Will remove HET residues (headless / all files):", ", ".join(sorted(residues_to_remove)))
+            if chains_to_remove_global:
+                print("✂️ Will remove chains (headless / all files):", ", ".join(sorted(chains_to_remove_global)))
 
-        for fname in files:
-            per_file_choices[fname] = (set(residues_to_remove), set(chains_to_remove_global))
+        per_file_choices = {fname: (set(residues_to_remove), set(chains_to_remove_global)) for fname in files}
+
+        # Summary file (only if allowed)
+        if (not args.pdbqt_only) and args.write_summary:
+            summary_path = os.path.join(output_dir, "HETATM_summary.txt")
+            with open(summary_path, "w") as sf:
+                sf.write(f"Folder: {folder}\n")
+                sf.write("HET (ligand/ion/water) residue counts (index | name | count | files)\n")
+                if het_names_sorted:
+                    for idx, (name, count) in enumerate(het_names_sorted, 1):
+                        files_str = ", ".join(sorted(het_presence[name]))
+                        sf.write(f"{idx:>3} | {name:<6} | {count:<4} | {files_str}\n")
+                else:
+                    sf.write("(none)\n")
+            print(f"\n🧾 Wrote HET summary → {summary_path}")
+        elif args.pdbqt_only and args.write_summary:
+            print("ℹ️ --write-summary requested, but --pdbqt-only is active; summary will be swept. Use --no-pdbqt-only to keep it.")
 
     else:
-        print(f"\n📦 Found {len(files)} structure file(s). Per-file selection enabled.\n")
+        # per-file mode
+        if interactive:
+            print(f"\n📦 Found {len(files)} structure file(s). Per-file selection enabled.\n")
+        # Load per-file config (headless)
+        cfg = load_per_file_config(args.per_file_config) if (args.headless and args.per_file_config) else {}
+
+        per_file_choices = {}
         for fname in files:
-            fpath = os.path.join(selected_folder, fname)
-            print(f"── {fname} ─────────────────────────────────────────────")
+            fpath = os.path.join(folder, fname)
+            if interactive:
+                print(f"── {fname} ─────────────────────────────────────────────")
             try:
                 hets, chains = scan_file_for_hets_and_chains(fpath)
             except Exception as e:
@@ -389,64 +599,75 @@ def main():
                 continue
 
             het_sorted = sorted(hets.items(), key=lambda x: (-x[1], x[0]))
-            print("🔎 HET (ligands/ions/waters) in this file:")
-            if not het_sorted:
-                print("  (none)")
+            if interactive:
+                print("🔎 HET (ligands/ions/waters) in this file:")
+                if not het_sorted:
+                    print("  (none)")
+                else:
+                    for idx, (name, count) in enumerate(het_sorted, 1):
+                        print(f"  {idx:>3}. {name:<6} | count: {count:<4}")
+                print("🔗 Chains in this file:", ", ".join(sorted(chains)) if chains else "(none)")
+
+            if interactive:
+                res_remove = set()
+                if het_sorted:
+                    sel = input("🧽 Select HET indices to remove for THIS file (1,2,...) or 'all' or blank to skip: ").strip().lower()
+                    if sel == "all":
+                        res_remove = {name for name, _ in het_sorted}
+                    elif sel:
+                        try:
+                            chosen = {int(x.strip()) for x in sel.split(",") if x.strip()}
+                            for i in chosen:
+                                if 1 <= i <= len(het_sorted):
+                                    res_remove.add(het_sorted[i-1][0])
+                                else:
+                                    print(f"  ⚠️ Ignoring out-of-range index: {i}")
+                        except ValueError:
+                            print("  ⚠️ Invalid index list, skipping automatic HET removal.")
+                extra_res = input("➕ Extra 3-letter residue names to remove (optional): ").strip()
+                if extra_res:
+                    res_remove |= {r.strip().upper() for r in extra_res.split(",") if r.strip()}
+                if res_remove:
+                    print("🧼 Will remove HET residues (this file):", ", ".join(sorted(res_remove)))
+                else:
+                    print("ℹ️ No HET residue names selected (this file).")
+                chain_resp = input("🧩 Chains to remove for THIS file (comma-separated, blank to keep all): ").strip()
+                chains_to_remove = {c.strip() for c in chain_resp.split(",") if c.strip()} if chain_resp else set()
+                if chains_to_remove:
+                    print("✂️ Will remove chains (this file):", ", ".join(sorted(chains_to_remove)))
+                else:
+                    print("ℹ️ Keeping all chains (this file).")
             else:
-                for idx, (name, count) in enumerate(het_sorted, 1):
-                    print(f"  {idx:>3}. {name:<6} | count: {count:<4}")
-
-            print("🔗 Chains in this file:", ", ".join(sorted(chains)) if chains else "(none)")
-
-            res_remove = set()
-            if het_sorted:
-                sel = input("🧽 Select HET indices to remove for THIS file (1,2,...) or 'all' or blank to skip: ").strip().lower()
-                if sel == "all":
+                # headless per-file: use config or defaults (all HETs, no chains)
+                entry = cfg.get(fname, {})
+                rm_het = entry.get("remove_het", "all")
+                if isinstance(rm_het, str) and rm_het.strip().lower() == "all":
                     res_remove = {name for name, _ in het_sorted}
-                elif sel:
-                    try:
-                        chosen = {int(x.strip()) for x in sel.split(",") if x.strip()}
-                        for i in chosen:
-                            if 1 <= i <= len(het_sorted):
-                                res_remove.add(het_sorted[i-1][0])
-                            else:
-                                print(f"  ⚠️ Ignoring out-of-range index: {i}")
-                    except ValueError:
-                        print("  ⚠️ Invalid index list, skipping automatic HET removal.")
+                else:
+                    res_remove = {str(x).strip().upper() for x in rm_het}
+                chains_to_remove = {str(x).strip() for x in entry.get("remove_chains", [])}
 
-            extra_res = input("➕ Extra 3-letter residue names to remove (optional): ").strip()
-            if extra_res:
-                res_remove |= {r.strip().upper() for r in extra_res.split(",") if r.strip()}
-
-            if res_remove:
-                print("🧼 Will remove HET residues (this file):", ", ".join(sorted(res_remove)))
-            else:
-                print("ℹ️ No HET residue names selected (this file).")
-
-            chain_resp = input("🧩 Chains to remove for THIS file (comma-separated, blank to keep all): ").strip()
-            chains_to_remove = {c.strip() for c in chain_resp.split(",") if c.strip()} if chain_resp else set()
-            if chains_to_remove:
-                print("✂️ Will remove chains (this file):", ", ".join(sorted(chains_to_remove)))
-            else:
-                print("ℹ️ Keeping all chains (this file).")
+                # Log choice
+                if res_remove:
+                    print(f"🧼 [{fname}] remove HET: {', '.join(sorted(res_remove))}")
+                if chains_to_remove:
+                    print(f"✂️ [{fname}] remove chains: {', '.join(sorted(chains_to_remove))}")
 
             per_file_choices[fname] = (res_remove, chains_to_remove)
-            print()
+            if interactive:
+                print()
 
-    print(f"🔧 Using receptor preparer: {prep_kind}")
-
-    # Process files
+    # PROCESS
     success = 0
     fail = 0
-
     for fname in files:
-        in_path = os.path.join(selected_folder, fname)
+        in_path = os.path.join(folder, fname)
         base = os.path.splitext(fname)[0]
         cleaned_pdb = os.path.join(temp_cleaned_dir, base + ".clean.pdb")
         residues_to_remove, chains_to_remove = per_file_choices.get(fname, (set(), set()))
 
         try:
-            clean_structure_to_pdb(in_path, cleaned_pdb, residues_to_remove, chains_to_remove)
+            clean_structure_to_pdb(in_path, cleaned_pdb, residues_to_remove, chains_to_remove, altloc_policy=args.altloc)
             print(f"\n🧹 Cleaning {fname} → {os.path.basename(cleaned_pdb)}")
         except Exception as e:
             print(f"❌ Failed cleaning {fname}: {e}")
@@ -463,6 +684,9 @@ def main():
             print(f"⚙️ Converting {fname} → {os.path.basename(out_pdbqt)}")
             subprocess.run(cmd, check=True, env=env)
             print(f"✅ Saved: {out_pdbqt}")
+            # Optional artifacts if allowed
+            if (not args.pdbqt_only) and args.keep_clean_pdb and (not is_cif_name(fname)):
+                shutil.copy2(cleaned_pdb, os.path.join(output_dir, base + ".clean.pdb"))
             success += 1
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed conversion on {fname}: {e}")
@@ -474,13 +698,14 @@ def main():
     except Exception:
         pass
 
-    # Final sweep: ensure ONLY .pdbqt remain in output folder
-    for g in os.listdir(output_dir):
-        if not g.lower().endswith(".pdbqt"):
-            try:
-                os.remove(os.path.join(output_dir, g))
-            except Exception:
-                pass
+    # Final sweep (PDBQT-only)
+    if args.pdbqt_only:
+        for g in os.listdir(output_dir):
+            if not g.lower().endswith(".pdbqt"):
+                try:
+                    os.remove(os.path.join(output_dir, g))
+                except Exception:
+                    pass
 
     print("\n🎉 Done.")
     print(f"   ✅ Converted: {success}")
