@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+3a_PDB2PDBQTbatch.py
+Interactive receptor prep for AutoDock Vina with:
+- PDB + mmCIF input support
+- True-HET detection (ligands/ions/waters/sugars)
+- Optional chain removal (batch or per-file)
+- AltLoc collapse to a single conformation per atom
+- Conversion to PDBQT via Meeko / ADT_py3 / legacy MGLTools
+- FINAL OUTPUT: **only .pdbqt** files (always)
+
+Requires: gemmi  (pip install gemmi)
+Optional: meeko  (pip install meeko)
+Optional: ADT_py3 (pip install -e ./AutoDockTools_py3 OR pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3)
+"""
+
 import os
 import sys
 import shutil
@@ -6,39 +23,38 @@ import subprocess
 from collections import Counter, defaultdict
 import importlib.util
 
-# =========================
-# Dependencies
-# =========================
+# =============== Global policy ===============
+# Always keep ONLY .pdbqt files in the final output directory
+ALWAYS_PDBQT_ONLY = True
+
+# =============== Dependencies ===============
 try:
     import gemmi
 except ImportError:
     print("❌ Requires 'gemmi'. Install with: pip install gemmi")
     sys.exit(1)
 
-# =========================
-# Helper: module presence
-# =========================
+# =============== Helpers: module presence & backends ===============
 def has_module(modname: str) -> bool:
     return importlib.util.find_spec(modname) is not None
 
-# =========================
-# Receptor preparer resolver
-# =========================
 def resolve_receptor_preparer():
     """
     Returns (kind, base_cmd_list, extra_env_or_None)
     kind ∈ {'meeko','adt_module','adt_local','mgltools',None}
+    Priority:
+      1) Meeko (mk_prepare_receptor.py)
+      2) ADT_py3 installed as module
+      3) ADT_py3 local checkout in ./AutoDockTools_py3 (PYTHONPATH)
+      4) MGLTools legacy (prepare_receptor4.py on PATH)
     """
-    # 1) Meeko
     meeko = shutil.which("mk_prepare_receptor.py")
     if meeko:
         return "meeko", [meeko], None
 
-    # 2) ADT_py3 installed as a module
     if has_module("AutoDockTools.Utilities24.prepare_receptor4"):
         return "adt_module", [sys.executable, "-m", "AutoDockTools.Utilities24.prepare_receptor4"], None
 
-    # 3) Local checkout with PYTHONPATH
     local_script = os.path.join("AutoDockTools_py3", "AutoDockTools", "Utilities24", "prepare_receptor4.py")
     if os.path.exists(local_script):
         env = os.environ.copy()
@@ -46,16 +62,13 @@ def resolve_receptor_preparer():
         env["PYTHONPATH"] = adt_root + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
         return "adt_local", [sys.executable, local_script], env
 
-    # 4) Legacy MGLTools on PATH
     mgl = shutil.which("prepare_receptor4.py")
     if mgl:
         return "mgltools", [mgl], None
 
     return None, None, None
 
-# =========================
-# Constants
-# =========================
+# =============== Constants for HET classification ===============
 STD_AA = {
     "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
     "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
@@ -63,11 +76,9 @@ STD_AA = {
 }
 STD_NT = {"A","C","G","T","U","I","DA","DC","DG","DT","DI","RA","RC","RG","RU"}
 WATER_NAMES = {"HOH","WAT","H2O"}
-COMMON_SUGARS = {"NAG","BMA","MAN","GAL","FUC","NDG"}  # treated as HET
+COMMON_SUGARS = {"NAG","BMA","MAN","GAL","FUC","NDG"}  # treat as HET
 
-# =========================
-# HET classification
-# =========================
+# =============== HET classification ===============
 def is_true_het(res: gemmi.Residue, chain=None) -> bool:
     name = res.name.strip().upper()
     if name in WATER_NAMES:
@@ -83,9 +94,7 @@ def is_true_het(res: gemmi.Residue, chain=None) -> bool:
         return True
     return False
 
-# =========================
-# AltLoc policy
-# =========================
+# =============== AltLoc policy ===============
 def iter_atoms_with_altloc_policy(res, policy="collapse"):
     """
     'collapse': choose a single atom per atom name using highest occupancy;
@@ -101,7 +110,7 @@ def iter_atoms_with_altloc_policy(res, policy="collapse"):
     for a in res:
         key = a.name.strip()
         alt = getattr(a, "altloc", "") or ""
-        occ = getattr(a, "occ", 0.0)
+        occ = getattr(a, "occ", 1.0)
         prev = groups.get(key)
         if prev is None:
             groups[key] = (a, alt, occ)
@@ -113,9 +122,7 @@ def iter_atoms_with_altloc_policy(res, policy="collapse"):
     for a, _, _ in groups.values():
         yield a
 
-# =========================
-# Version-agnostic PDB writer
-# =========================
+# =============== PDB writing (version-agnostic) ===============
 def format_atom_name(atom_name: str) -> str:
     n = atom_name.strip()
     if len(n) >= 4:
@@ -198,9 +205,7 @@ def write_pdb_compat(structure: gemmi.Structure, out_pdb_path: str):
             pass
     pdb_write_manual(structure, out_pdb_path)
 
-# =========================
-# IO helpers
-# =========================
+# =============== IO helpers ===============
 def read_structure(path: str) -> gemmi.Structure:
     return gemmi.read_structure(path)
 
@@ -208,9 +213,7 @@ def is_cif_name(filename: str) -> bool:
     ext = os.path.splitext(filename.lower())[1]
     return ext in {".cif", ".mmcif"}
 
-# =========================
-# Scanning helpers
-# =========================
+# =============== Scanning helpers ===============
 def scan_file_for_hets_and_chains(path: str):
     """Return (Counter{name->count}, set(chains)) for a single file."""
     hets = Counter()
@@ -241,9 +244,7 @@ def scan_all(files, folder):
             print(f"⚠️ Skipping {fname}: {e}")
     return het_counter, het_presence, chains_per_file
 
-# =========================
-# Cleaning step
-# =========================
+# =============== Cleaning step ===============
 def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_drop):
     st = gemmi.read_structure(in_path)
     new_st = gemmi.Structure()
@@ -271,9 +272,7 @@ def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_dr
 
     write_pdb_compat(new_st, out_pdb_path)
 
-# =========================
-# Main
-# =========================
+# =============== Main ===============
 def main():
     # list folders
     print("\n📁 Available folders in current directory:")
@@ -298,31 +297,33 @@ def main():
         print("❌ No .pdb / .cif / .mmcif files found in the selected folder.")
         sys.exit(1)
 
-    any_cif_present = any(is_cif_name(f) for f in files)
-
-    # If multiple, ask batch vs per-file
+    # Ask batch vs per-file if multiple
     batch_mode = True
     if len(files) > 1:
         ans = input("\n🗂️ Multiple structures detected. Batch process with the SAME choices for all? [Y/n]: ").strip().lower()
         batch_mode = (ans in ("", "y", "yes"))
 
-    # Resolve preparer up front
+    # Resolve preparer
     prep_kind, prep_base, prep_env = resolve_receptor_preparer()
     if not prep_kind:
         raise RuntimeError(
             "No receptor preparer found. Install Meeko (`pip install meeko`) or ADT_py3 "
-            "(`pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3`) "
+            "(`pip install -e ./AutoDockTools_py3` or `pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3`) "
             "or ensure MGLTools' prepare_receptor4.py is on PATH."
         )
 
+    # Output / temp
     output_dir = selected_folder + "_PDBQT_Converted"
     os.makedirs(output_dir, exist_ok=True)
-
     temp_cleaned_dir = ".temp_cleaned_pdbs"
     os.makedirs(temp_cleaned_dir, exist_ok=True)
 
-    # Batch mode: one selection for all files
-    per_file_choices = {}  # fname -> (res_set, chain_set)
+    # Info banner
+    if ALWAYS_PDBQT_ONLY:
+        print("\n🧾 PDBQT-only mode: final output folder will contain ONLY .pdbqt files.\n")
+
+    # Gather choices
+    per_file_choices = {}
 
     if batch_mode:
         print(f"\n📦 Found {len(files)} structure file(s). Scanning for HET ligands/waters and chains...")
@@ -373,12 +374,10 @@ def main():
         else:
             print("ℹ️ No chains selected for removal.")
 
-        # Assign same choices to all files
         for fname in files:
             per_file_choices[fname] = (set(residues_to_remove), set(chains_to_remove_global))
 
     else:
-        # Per-file mode: loop files and ask choices individually
         print(f"\n📦 Found {len(files)} structure file(s). Per-file selection enabled.\n")
         for fname in files:
             fpath = os.path.join(selected_folder, fname)
@@ -432,32 +431,14 @@ def main():
                 print("ℹ️ Keeping all chains (this file).")
 
             per_file_choices[fname] = (res_remove, chains_to_remove)
-            print()  # spacer
-
-    # Summaries only if NO CIFs present (CIF strict mode forbids non-PDBQT artifacts)
-    if not any_cif_present:
-        # Aggregate global HETs for reproducibility
-        het_counter, het_presence, _chains = scan_all(files, selected_folder)
-        het_names_sorted = sorted(het_counter.items(), key=lambda x: (-x[1], x[0]))
-        summary_path = os.path.join(output_dir, "HETATM_summary.txt")
-        with open(summary_path, "w") as sf:
-            sf.write(f"Folder: {selected_folder}\n")
-            sf.write("HET (ligand/ion/water) residue counts (index | name | count | files)\n")
-            if het_names_sorted:
-                for idx, (name, count) in enumerate(het_names_sorted, 1):
-                    files_str = ", ".join(sorted(het_presence[name]))
-                    sf.write(f"{idx:>3} | {name:<6} | {count:<4} | {files_str}\n")
-            else:
-                sf.write("(none)\n")
-        print(f"\n🧾 Wrote HET summary → {summary_path}")
-    else:
-        print("\n🧾 CIF detected → strict mode: final output will contain only .pdbqt files (no summary, no .clean.pdb).")
+            print()
 
     print(f"🔧 Using receptor preparer: {prep_kind}")
 
     # Process files
     success = 0
     fail = 0
+
     for fname in files:
         in_path = os.path.join(selected_folder, fname)
         base = os.path.splitext(fname)[0]
@@ -482,11 +463,6 @@ def main():
             print(f"⚙️ Converting {fname} → {os.path.basename(out_pdbqt)}")
             subprocess.run(cmd, check=True, env=env)
             print(f"✅ Saved: {out_pdbqt}")
-
-            # Only keep .clean.pdb when NO CIFs in the set AND this input was a PDB
-            if (not any_cif_present) and (not is_cif_name(fname)):
-                shutil.copy2(cleaned_pdb, os.path.join(output_dir, base + ".clean.pdb"))
-
             success += 1
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed conversion on {fname}: {e}")
@@ -498,14 +474,13 @@ def main():
     except Exception:
         pass
 
-    # CIF strict mode: ensure ONLY .pdbqt remain in output folder
-    if any_cif_present:
-        for g in os.listdir(output_dir):
-            if not g.lower().endswith(".pdbqt"):
-                try:
-                    os.remove(os.path.join(output_dir, g))
-                except Exception:
-                    pass
+    # Final sweep: ensure ONLY .pdbqt remain in output folder
+    for g in os.listdir(output_dir):
+        if not g.lower().endswith(".pdbqt"):
+            try:
+                os.remove(os.path.join(output_dir, g))
+            except Exception:
+                pass
 
     print("\n🎉 Done.")
     print(f"   ✅ Converted: {success}")
