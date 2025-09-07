@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Tool temp/output
+.temp_cleaned_pdbs/
+*_PDBQT_Converted/
+Receptors_PDBQT_Converted/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

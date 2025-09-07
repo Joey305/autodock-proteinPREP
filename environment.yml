@@ -1,0 +1,26 @@
+name: vina
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+
+  # (optional) If you prefer conda-forge's gemmi instead of pip, uncomment the next line
+  # - gemmi>=0.6.3
+
+  - pip:
+      # Core deps (install via pip for consistent wheels across OSes)
+      - gemmi>=0.6.3
+      - meeko>=0.5.0
+
+      # === Receptor prep backends (the script auto-detects) ===
+      # Option A: install ADT_py3 from the vendored folder in this repo (recommended)
+      - -e ./AutoDockTools_py3
+
+      # Option B: OR install ADT_py3 from GitHub instead of the local folder
+      # - git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3
+
+      # (do NOT add classic MGLTools here; if it's on your PATH in a separate env,
+      # the script can use it as a fallback automatically)
