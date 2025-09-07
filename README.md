@@ -1,193 +1,209 @@
 # autodock-proteinPREP
 
-A lightweight, interactive tool to prep protein receptors for AutoDock Vina.
-It reads **PDB** and **mmCIF**, lets you remove **true HET groups** (ligands/ions/waters/sugars) and/or **specific chains**, collapses **altLocs**, and converts everything to **PDBQT** using whichever backend you have available (Meeko or AutoDockTools).
+A lightweight, interactive tool to prep protein receptors for **AutoDock Vina**.
+
+* Reads **PDB** and **mmCIF**.
+* Lists only **true HET groups** (ligands/ions/waters/sugars) by index for easy removal.
+* Optional **chain** removal per file.
+* **Collapses altLocs** to a single conformation per atom.
+* Converts cleaned structures to **PDBQT** using whichever backend you have available.
+* **CIF strict mode**: if any input is `.cif/.mmcif`, the final output folder contains **only** `.pdbqt` files.
+
+> This repo **vendors** `AutoDockTools_py3/` (no submodules required). The environment installs it in editable mode automatically.
 
 ---
 
-## Why this exists
+## What’s inside
 
-* I didn’t want to memorize half a dozen prep commands for every receptor source.
-* I needed a single script that works in different environments (with or without Meeko / ADT).
-* I wanted fast, repeatable cleanup: pick HETs by index, optionally drop chains, get PDBQT out.
-
----
-
-## Quick start (with submodules)
-
-```bash
-# 1) Clone WITH SUBMODULES (needed for AutoDockTools_py3)
-git clone --recurse-submodules https://github.com/Joey305/autodock-proteinPREP.git
-cd autodock-proteinPREP
-
-# 2) Create & activate the environment from this repo
-conda env create -f environment.yml
-conda activate vina
-
-# 3) Run the receptor prep tool
-python 3a_PDB2PDBQTbatch.py
+```
+3a_PDB2PDBQTbatch.py        # main interactive prep tool
+4A_PARSEvinascores.py       # (optional) your downstream parser
+AutoDockTools_py3/          # vendored ADT (Python 3 port)
+Receptors/                  # example inputs (PDB + CIF mixed)
+Receptors-Copy/             # tiny example set
+environment.yml             # environment spec
 ```
 
-> Already cloned without submodules?
->
-> ```bash
-> git submodule update --init --recursive
-> ```
+Backends are auto-detected in this order:
+
+1. **Meeko** (`mk_prepare_receptor.py`)
+2. **AutoDockTools\_py3** (installed module from the vendored folder)
+3. **AutoDockTools\_py3** (local checkout path with `PYTHONPATH`)
+4. **MGLTools** legacy `prepare_receptor4.py` on PATH (optional fallback)
 
 ---
 
-## What it does
+## Quick start
 
-* Accepts **.pdb / .ent / .cif / .mmcif** from a folder you choose.
-* Scans and lists only **true HET** residue names (ligands/ions/waters/sugars).
-* Lets you select HETs by **index** (e.g., `1,3,5`) or **`all`**.
-* **Optional chain removal** by chain ID (e.g., `A,B`).
-* **AltLoc collapse**: keeps one atom per name, preferring highest occupancy (ties: `' '` > `A` > lexicographic).
-* Converts cleaned structures to **PDBQT** using the first available backend:
+```bash
+# 1) Clone
+ git clone https://github.com/Joey305/autodock-proteinPREP.git
+ cd autodock-proteinPREP
 
-  1. **Meeko** `mk_prepare_receptor.py`
-  2. **AutoDockTools\_py3** (module installed)
-  3. **AutoDockTools\_py3** (local submodule checkout)
-  4. **MGLTools** `prepare_receptor4.py` on PATH (legacy)
-* **CIF strict mode**: if **any** input is CIF/mmCIF, the output folder contains **only** `.pdbqt` files (no `.clean.pdb`, no summary).
+# 2) Create & activate the environment
+ conda env create -f environment.yml
+ conda activate vina
+
+# 3) Run the prep tool
+ python 3a_PDB2PDBQTbatch.py
+```
+
+> The environment installs `gemmi`, `meeko`, and `AutoDockTools_py3` (from the vendored folder) automatically.
 
 ---
 
-## Installation
+## Example walkthroughs
 
-**Requirements**
+### A) Small set: `Receptors-Copy/`
 
-* Python **3.9–3.12** (3.11 recommended)
-* `conda` or `pip`
-* Linux/macOS or Windows (WSL recommended)
+This folder includes a PDB and a CIF — so **CIF strict mode** will apply (only `.pdbqt` files will be kept in the output).
 
-### Environment (from this repo)
+```text
+📁 Available folders in current directory:
+1. AutoDockTools_py3
+2. Receptors
+3. Receptors-Copy
+🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): 3
 
-The included `environment.yml` installs:
+# Multiple files? You’ll be asked if you want batch mode.
+🗂️ Multiple structures detected. Batch process with the SAME choices for all? [Y/n]: n   # choose per-file
 
-* `gemmi` (structure IO)
-* `meeko` (modern AutoDock IO)
-* `AutoDockTools_py3` from the **submodule** (editable install `-e ./AutoDockTools_py3`)
+── 5ND2.pdb ──
+🔎 HET (ligands/ions/waters) in this file:
+  1. HOH | count: ...
+🔗 Chains in this file: C
+🧽 Select HET indices to remove for THIS file (1,2,...) or 'all' or blank to skip: 1
+🧩 Chains to remove for THIS file (comma-separated, blank to keep all):    # press Enter to keep C
 
-Create it like this:
+── 7hg9.cif ──
+🔎 HET ...
+🔗 Chains in this file: A, B, C
+🧽 Select HET indices ...: all
+🧩 Chains to remove for THIS file: A,C
 
-```bash
-conda env create -f environment.yml
-conda activate vina
+# Conversion runs; output goes to Receptors-Copy_PDBQT_Converted/
+# Because there's a CIF, only .pdbqt files are kept in the output folder.
 ```
 
-### Alternative: no submodules
+### B) Larger set: `Receptors/`
 
-If you don’t want to use submodules, you can remove the editable line in `environment.yml` and install ADT\_py3 directly from GitHub:
+Mixed PDB + CIF; you can choose **batch mode** to apply the same HET/chain choices to all, or **per-file** to tailor each.
 
-```bash
-pip install gemmi meeko
-pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3
+```text
+🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): 2
+🗂️ Multiple structures detected. Batch process with the SAME choices for all? [Y/n]: y
+🔎 HET ... (aggregated across all files)
+🧽 Select HET indices to remove (e.g. 1,2,5) or 'all' to remove all shown: all
+🧩 Remove specific chains for ALL files? (comma-separated, blank to skip): B,C
 ```
 
-The script auto-detects which backend you have and uses that.
+* Output folder: `Receptors_PDBQT_Converted/`
+* Because this set contains a **CIF**, only `.pdbqt` files are kept in the output folder.
+
+> Tip: Re-run in **per-file mode** when chain IDs differ among structures and you want different chain removal per file.
 
 ---
 
-## Usage
+## Usage details
 
-Put your receptor files under a folder like `Receptors/`, then run:
+### HET selection
 
-```bash
-python 3a_PDB2PDBQTbatch.py
-```
+* The tool lists **true HET** residues only (ligands/ions/waters/sugars). Standard amino acids/nucleotides are never listed as HETs.
+* Choose by **index** (e.g., `1,3,5`) or **`all`**. You can also add extra 3‑letter codes manually.
 
-You’ll see:
+### Chain removal
 
-1. A prompt to choose a folder containing structures.
-2. If multiple files are found, you can **batch** process with the same choices, or handle them **per-file** with different HET/chain selections.
-3. A numbered list of **HET** groups (true ligands/ions/waters/sugars) to remove.
-4. An optional prompt to remove **chains** by ID.
-
-### Modes
-
-* **Batch mode**: one HET/chain selection is applied to **all** structures.
-* **Per-file mode**: you make HET/chain choices **independently** per structure.
+* Provide chain IDs like `A,B` to drop whole chains. In per-file mode, you choose chains **per structure**.
 
 ### AltLoc handling
 
-Alternate locations are collapsed automatically to one conformation per atom using highest occupancy (tie-breakers: `' '` > `A` > lexicographic). This prevents the “thousands of alternate location atoms” warnings in ADT.
-
-### CIF strict mode
-
-If **any** input file is `.cif/.mmcif`, the output folder will contain **only** `.pdbqt`.
-No `.clean.pdb` and no summary file are kept in that case.
+* AltLocs are **collapsed** automatically to one atom per name using highest occupancy (ties: `' '` > `A` > lexicographic). This prevents ADT’s alternate-location warnings.
 
 ### Outputs
 
-* Output folder: `<ChosenFolder>_PDBQT_Converted/`
-* For every input: `<basename>.converted.pdbqt`
+* `<ChosenFolder>_PDBQT_Converted/` is created.
+* For every input: `<basename>.converted.pdbqt`.
 * If **only PDBs** were processed, the tool also writes:
 
-  * `<basename>.clean.pdb` (cleaned input)
+  * `<basename>.clean.pdb` (cleaned PDB before conversion)
   * `HETATM_summary.txt` (HET counts across the set)
+* If **any CIF** is present: output folder contains **only** `.pdbqt` (strict mode sweep).
+
+---
+
+## Installation notes
+
+### Requirements
+
+* Python 3.9–3.12 (3.11 recommended)
+* Conda (or Python venv) and `pip`
+* Linux/macOS/Windows (WSL recommended on Windows)
+
+### What `environment.yml` does
+
+* Installs `gemmi>=0.6.3` and `meeko>=0.5.0` via pip.
+* Installs **vendored** `AutoDockTools_py3/` in editable mode (`-e ./AutoDockTools_py3`).
+
+### Verify your setup
+
+```bash
+python -c "import gemmi; print('gemmi OK')"
+python -c "import meeko; print('meeko OK')"          # optional but recommended
+python -c "import AutoDockTools, MolKit; print('ADT_py3 OK')"
+```
+
+### Prefer pip‑installing ADT\_py3 instead of vendoring?
+
+Remove the editable line from `environment.yml` and run:
+
+```bash
+pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3
+```
+
+The script will auto-detect it.
 
 ---
 
 ## Troubleshooting
 
-**“MolKit / AutoDockTools import error”**
-Make sure you either:
+**MolKit/AutoDockTools import error**
 
-* cloned with submodules and created the env from `environment.yml`, or
-* installed `AutoDockTools_py3` via `pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3`.
+* You’re probably outside the env or the vendored install failed. Recreate the env, or install ADT\_py3 via pip from GitHub.
 
-**“gemmi not found”**
-Install it: `pip install gemmi` (already in `environment.yml`).
+**`gemmi` not found**
 
-**ADT warnings about altlocs**
-These are safe to ignore; the script already collapses altlocs before conversion. If a particular PDB/mmCIF still triggers huge warnings, open an issue with the file.
+* `pip install gemmi` (already handled by `environment.yml`).
+
+**Thousands of altloc warnings in ADT**
+
+* Safe to ignore; the script collapses altlocs first. If a particular structure still explodes with warnings, please open an issue and attach the file name.
 
 **No receptor preparer found**
-Install at least one backend:
 
-* `pip install meeko` (recommended), or
-* `pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3`, or
-* ensure legacy MGLTools is on your PATH.
+* Install at least one backend: `pip install meeko` **or** `pip install git+https://github.com/Valdes-Tresanco-MS/AutoDockTools_py3`.
 
----
+**Windows tip**
 
-## Submodule management (for contributors)
-
-Update ADT\_py3 to its latest upstream:
-
-```bash
-git submodule update --remote --merge
-git add AutoDockTools_py3
-git commit -m "Update AutoDockTools_py3 submodule"
-```
-
-If you prefer SSH for submodules:
-
-```bash
-git config -f .gitmodules submodule.AutoDockTools_py3.url git@github.com:Valdes-Tresanco-MS/AutoDockTools_py3.git
-git submodule sync --recursive
-git submodule update --init --recursive
-```
+* Use **WSL** for best results. Long paths and CRLF line endings can cause oddities in native shells.
 
 ---
 
 ## Tips
 
-* Want to keep waters? Don’t select `HOH/WAT/H2O` when choosing HET indices.
-* Chain IDs can differ per structure. Use **per-file** mode to tailor removals.
-* Commit the `HETATM_summary.txt` (when PDB-only) to record what was removed.
+* Keep waters? Don’t select `HOH/WAT/H2O` when choosing HET indices.
+* Different chain policies per structure? Choose **per-file** mode.
+* Commit `HETATM_summary.txt` (PDB‑only runs) to document what was removed.
 
 ---
 
 ## License
 
-MIT (recommended for tooling). If you adopt another license, drop it in `LICENSE`.
+MIT (recommended for tooling). If you use another license, add a `LICENSE` file.
 
 ---
 
 ## Acknowledgements
 
-* **Gemmi** for reliable structure IO.
+* **Gemmi** for fast, robust structure I/O.
 * **Meeko** for modern AutoDock/Vina IO.
-* **AutoDockTools\_py3** (Valdes-Tresanco et al.) for the Python-3 port of `prepare_receptor4.py`.
+* **AutoDockTools\_py3** (Valdes‑Tresanco et al.) for the Python‑3 port of `prepare_receptor4.py`.
