@@ -274,7 +274,7 @@ python 3a_PDB2PDBQTbatch.py \
 
 ## License
 
-MIT (recommended for tooling). If you use another license, add a `LICENSE` file.
+MIT 
 
 ---
 
