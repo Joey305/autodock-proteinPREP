@@ -4,10 +4,11 @@ A lightweight, interactive **and** headless tool to prep protein receptors for *
 
 * Reads **PDB** and **mmCIF**
 * Lists only **true HET groups** (ligands/ions/waters/sugars) by index
-* Optional **chain** removal (batch or per‑file)
+* Optional **chain** removal (batch or per-file)
 * **Collapses altLocs** to a single conformation per atom
 * Converts to **PDBQT** via Meeko / AutoDockTools (ADT) / legacy MGLTools
-* **PDBQT‑only output** by default (final folder contains only `.pdbqt`)
+* **PDBQT-only output** by default (final folder contains only `.pdbqt`)
+* NEW: **GUI folder picker** (press `0` at the folder prompt, or use `--browse`) that pops to the front
 
 This repository **vendors** `AutoDockTools_py3/` (no submodule steps). The environment installs it in editable mode automatically.
 
@@ -17,18 +18,26 @@ This repository **vendors** `AutoDockTools_py3/` (no submodule steps). The envir
 
 ```bash
 # 1) Clone
- git clone https://github.com/Joey305/autodock-proteinPREP.git
- cd autodock-proteinPREP
+git clone https://github.com/Joey305/autodock-proteinPREP.git
+cd autodock-proteinPREP
 
 # 2) Create & activate the environment
- conda env create -f environment.yml
- conda activate vina
+conda env create -f environment.yml
+conda activate vina
 
-# 3) Run interactively (heads‑up display)
- python 3a_PDB2PDBQTbatch.py
+# 3) Run interactively (heads-up display)
+python 3a_PDB2PDBQTbatch.py
 ```
 
-You’ll pick a folder, review HETs and chains, choose removals, and the tool writes PDBQT files to `<Folder>_PDBQT_Converted/`.
+At the first prompt, you can:
+
+* Type the **number** of a folder listed, or
+* Type **`0`** to open a **GUI folder browser** (requires a desktop/display & Tk), or
+* Start with `--browse` to open the GUI picker immediately.
+
+The tool then lists HETs & chains, you choose removals, and it writes PDBQT files to `<Folder>_PDBQT_Converted/>`.
+
+> **Note (SSH/headless):** GUI browsing is not available without a display (e.g., pure SSH/CI). Use `--folder <path>` or pick from the list. If you want the GUI on Linux, ensure Tk is available (`conda install tk`) and a display is present (X11/Wayland). On Windows, WSLg on Win11 works well.
 
 ---
 
@@ -38,13 +47,13 @@ You’ll pick a folder, review HETs and chains, choose removals, and the tool wr
 * Detects **true HET** residues only (never lists standard amino acids or nucleotides)
 * Lets you remove HETs by **index** (or `all`) and optionally remove **chains** by ID
 * **AltLoc** policy: collapses to one atom per name using highest occupancy (tie: `' '` > `A` > lexicographic)
-* **Backends (auto‑detect, in order):**
+* **Backends (auto-detect, in order):**
 
   1. **Meeko** (`mk_prepare_receptor.py`)
   2. **AutoDockTools\_py3** (installed module)
   3. **AutoDockTools\_py3** (local vendored path)
   4. **MGLTools** legacy `prepare_receptor4.py` on PATH
-* **PDBQT‑only**: by default the final output folder contains only `.pdbqt` files (non‑PDBQT artifacts are swept)
+* **PDBQT-only**: by default the final output folder contains only `.pdbqt` files (non-PDBQT artifacts are swept)
 
 ---
 
@@ -55,6 +64,7 @@ You’ll pick a folder, review HETs and chains, choose removals, and the tool wr
 * Python **3.9–3.12** (3.11 recommended)
 * Conda (or another venv) and `pip`
 * Linux/macOS or Windows (WSL recommended on Windows)
+* *(Optional for GUI folder picker)* Tk libraries (`conda install tk`)
 
 **Environment**
 
@@ -94,21 +104,21 @@ This folder includes a PDB and a CIF. Run:
 python 3a_PDB2PDBQTbatch.py
 ```
 
-* Select **`Receptors-Copy`** at the prompt
-* Choose **per‑file** mode if you want different chain/HET policies per file
+* Select **`Receptors-Copy`** at the prompt (or press `0` for GUI browse)
+* Choose **per-file** mode if you want different chain/HET policies per file
 * Because this set contains a **CIF**, the output folder will end with **only `.pdbqt`** (no summary / no `.clean.pdb`)
 
 ### B) Larger set — `Receptors/`
 
-Run interactively and choose **batch** to apply the same choices across all files, or **per‑file** to tailor each.
+Run interactively and choose **batch** to apply the same choices across all files, or **per-file** to tailor each.
 
-> Tip: If chain IDs differ and you need per‑structure choices, pick **per‑file** mode.
+> Tip: If chain IDs differ and you need per-structure choices, pick **per-file** mode.
 
 ---
 
 ## Headless / automation
 
-Everything you can do interactively can be done headlessly (no prompts). Defaults in headless mode: **batch**, **remove all HETs**, **keep all chains**, **PDBQT‑only on**.
+Everything you can do interactively can be done headlessly (no prompts). Defaults in headless mode: **batch**, **remove all HETs**, **keep all chains**, **PDBQT-only on**.
 
 **Batch, remove all HETs, keep all chains (defaults):**
 
@@ -137,7 +147,7 @@ python 3a_PDB2PDBQTbatch.py \
   --remove-het-indices 1,3,5
 ```
 
-**Per‑file headless via JSON config:**
+**Per-file headless via JSON config:**
 
 `config.json`
 
@@ -200,6 +210,8 @@ python 3a_PDB2PDBQTbatch.py \
 --pdbqt-only / --no-pdbqt-only Keep only .pdbqt in final folder (default: on)
 --write-summary                Write HET summary (suppressed if --pdbqt-only)
 --keep-clean-pdb               Save cleaned PDBs (suppressed if --pdbqt-only)
+
+--browse                       (Interactive only) Open a GUI folder picker at start
 ```
 
 **Headless defaults**: `--mode batch`, `--remove-het all`, **keep all chains**, `--pdbqt-only`.
@@ -210,7 +222,7 @@ python 3a_PDB2PDBQTbatch.py \
 
 * Output folder: `<Folder>_PDBQT_Converted/`
 * For every input structure: `<basename>.converted.pdbqt`
-* If you *disable* PDBQT‑only (with `--no-pdbqt-only`):
+* If you *disable* PDBQT-only (with `--no-pdbqt-only`):
 
   * `.clean.pdb` copies can be kept (`--keep-clean-pdb`)
   * `HETATM_summary.txt` can be written (`--write-summary`; PDB inputs only)
@@ -227,6 +239,12 @@ python 3a_PDB2PDBQTbatch.py \
 **`gemmi` not found**
 
 * `pip install gemmi` (already handled by the environment file)
+
+**GUI folder picker doesn’t appear / errors**
+
+* Ensure a display exists (desktop session, WSLg on Win11, or X11/Wayland).
+* Install Tk if missing: `conda install tk` (or your OS’ Tk package).
+* Over SSH/CI with no display, use `--folder` or the numeric list selection instead.
 
 **Huge ADT altloc warnings**
 
@@ -249,8 +267,8 @@ python 3a_PDB2PDBQTbatch.py \
 ## Tips
 
 * Keep waters? Don’t select `HOH/WAT/H2O` when choosing HET indices.
-* Different chain policies per structure? Use **per‑file** mode (interactive or headless).
-* For audit trails, disable PDBQT‑only and enable `--write-summary` and `--keep-clean-pdb`.
+* Different chain policies per structure? Use **per-file** mode (interactive or headless).
+* For audit trails, disable PDBQT-only and enable `--write-summary` and `--keep-clean-pdb`.
 
 ---
 

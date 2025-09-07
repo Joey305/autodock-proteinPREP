@@ -15,10 +15,12 @@ FEATURES
     3) AutoDockTools_py3 (local checkout ./AutoDockTools_py3)
     4) Legacy MGLTools (prepare_receptor4.py on PATH)
 - FINAL OUTPUT: PDBQT-only (sweeps non-.pdbqt files from output dir by default)
+- NEW: Interactive option "0" to open a GUI folder picker (Tk) that comes to the front
 
 USAGE (INTERACTIVE)
     python 3a_PDB2PDBQTbatch.py
     # Follow the prompts (same heads-up display as before)
+    # At the folder prompt, enter 0 to use a GUI folder browser (requires a desktop/display & Tk)
 
 USAGE (HEADLESS / AUTOMATION)
     # Batch mode, remove all HETs, keep all chains, PDBQT-only (defaults)
@@ -85,6 +87,7 @@ ARGUMENTS (most useful)
   --pdbqt-only / --no-pdbqt-only  Keep only .pdbqt files (default: on)
   --write-summary               Write HET summary (only if not PDBQT-only)
   --keep-clean-pdb              Save cleaned PDBs (only if not PDBQT-only)
+  --browse                      Force opening a GUI folder picker at start (interactive only)
 
 HEADLESS DEFAULTS (when --headless is used)
   mode=batch, remove_het=all, remove_chains=none, pdbqt_only=True
@@ -93,6 +96,7 @@ REQUIREMENTS
   pip install gemmi
   (optional) pip install meeko
   (optional) pip install -e ./AutoDockTools_py3
+  (optional for GUI) conda install tk  # or system Tk libraries; not available over pure SSH without a display
 """
 
 import os
@@ -146,6 +150,9 @@ def parse_args():
 
     p.add_argument("--write-summary", action="store_true", help="Write HET summary (suppressed if --pdbqt-only)")
     p.add_argument("--keep-clean-pdb", action="store_true", help="Keep cleaned PDBs (suppressed if --pdbqt-only)")
+
+    # NEW: force GUI folder picker
+    p.add_argument("--browse", action="store_true", help="Open a GUI folder picker at start (interactive only)")
 
     return p.parse_args()
 
@@ -206,7 +213,7 @@ STD_NT = {"A","C","G","T","U","I","DA","DC","DG","DT","DI","RA","RC","RG","RU"}
 WATER_NAMES = {"HOH","WAT","H2O"}
 COMMON_SUGARS = {"NAG","BMA","MAN","GAL","FUC","NDG"}
 
-def is_true_het(res: gemmi.Residue, chain=None) -> bool:
+def is_true_het(res: 'gemmi.Residue', chain=None) -> bool:
     name = res.name.strip().upper()
     if name in WATER_NAMES:
         return True
@@ -260,7 +267,7 @@ def derive_element(atom) -> str:
         return letters[:2].title()
     return letters[0].upper()
 
-def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str, altloc_policy="collapse"):
+def pdb_write_manual(structure: 'gemmi.Structure', out_pdb_path: str, altloc_policy="collapse"):
     serial = 1
     lines = []
     wrote_any = False
@@ -309,7 +316,7 @@ def pdb_write_manual(structure: gemmi.Structure, out_pdb_path: str, altloc_polic
     if not wrote_any:
         raise RuntimeError("No atoms written — structure empty after filtering.")
 
-def write_pdb_compat(structure: gemmi.Structure, out_pdb_path: str, altloc_policy="collapse"):
+def write_pdb_compat(structure: 'gemmi.Structure', out_pdb_path: str, altloc_policy="collapse"):
     if hasattr(gemmi, "write_minimal_pdb") and altloc_policy == "collapse":
         try:
             gemmi.write_minimal_pdb(structure, out_pdb_path)
@@ -321,7 +328,7 @@ def write_pdb_compat(structure: gemmi.Structure, out_pdb_path: str, altloc_polic
 # =========================
 # IO / scanning helpers
 # =========================
-def read_structure(path: str) -> gemmi.Structure:
+def read_structure(path: str) -> 'gemmi.Structure':
     return gemmi.read_structure(path)
 
 def is_cif_name(filename: str) -> bool:
@@ -383,6 +390,37 @@ def clean_structure_to_pdb(in_path, out_pdb_path, residues_to_drop, chains_to_dr
     write_pdb_compat(new_st, out_pdb_path, altloc_policy=altloc_policy)
 
 # =========================
+# GUI folder picker (Tk)
+# =========================
+def choose_folder_via_tk():
+    """Open a Tk folder picker, bring it to front, return selected path or ''."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as e:
+        print(f"⚠️ GUI picker unavailable (tkinter not found): {e}")
+        return ""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        # Bring dialog to front on all platforms
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+        except Exception:
+            pass
+        # Show
+        folder = filedialog.askdirectory(title="Select receptor folder (contains .pdb / .cif)")
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return folder or ""
+    except Exception as e:
+        print(f"⚠️ GUI picker failed (no display or Tk error): {e}")
+        return ""
+
+# =========================
 # Utilities
 # =========================
 def parse_csv_list(s):
@@ -413,25 +451,51 @@ def load_per_file_config(path):
 def main():
     args = parse_args()
 
-    # Choose folder (interactive if not specified)
-    if not args.folder:
-        print("\n📁 Available folders in current directory:")
-        folders = [f for f in os.listdir() if os.path.isdir(f)]
-        for i, folder in enumerate(folders, 1):
-            print(f"{i}. {folder}")
-        choice = input("🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): ")
-        try:
-            folder_index = int(choice) - 1
-            folder = folders[folder_index]
-        except (ValueError, IndexError):
-            raise ValueError("❌ Invalid folder selection.")
-    else:
+    # Choose folder
+    if args.headless:
+        if not args.folder:
+            print("❌ In headless mode you must pass --folder.")
+            sys.exit(1)
         folder = args.folder
+    else:
+        # Interactive path
+        folder = args.folder
+        if args.browse and not folder:
+            picked = choose_folder_via_tk()
+            if picked:
+                folder = picked
+
+        if not folder:
+            print("\n📁 Available folders in current directory:")
+            folders = [f for f in os.listdir() if os.path.isdir(f)]
+            for i, folder_name in enumerate(folders, 1):
+                print(f"{i}. {folder_name}")
+            print("0. 🖱️  Browse for a folder (GUI)")
+
+            choice = input("🔍 Enter the number of the folder containing receptor structures (.pdb / .cif): ").strip()
+            if choice == "0":
+                picked = choose_folder_via_tk()
+                if picked:
+                    folder = picked
+                else:
+                    print("⚠️ GUI folder selection unavailable. Please choose from the list.")
+            if not folder:
+                try:
+                    folder_index = int(choice) - 1
+                    folder = folders[folder_index]
+                except (ValueError, IndexError):
+                    raise ValueError("❌ Invalid folder selection.")
 
     # Collect files
     valid_exts = {".pdb", ".ent", ".cif", ".mmcif"}
+    try:
+        file_candidates = os.listdir(folder)
+    except FileNotFoundError:
+        print(f"❌ Folder not found: {folder}")
+        sys.exit(1)
+
     all_files = sorted(
-        f for f in os.listdir(folder)
+        f for f in file_candidates
         if os.path.isfile(os.path.join(folder, f))
         and os.path.splitext(f.lower())[1] in valid_exts
     )
@@ -663,7 +727,7 @@ def main():
     for fname in files:
         in_path = os.path.join(folder, fname)
         base = os.path.splitext(fname)[0]
-        cleaned_pdb = os.path.join(temp_cleaned_dir, base + ".clean.pdb")
+        cleaned_pdb = os.path.join(".temp_cleaned_pdbs", base + ".clean.pdb")
         residues_to_remove, chains_to_remove = per_file_choices.get(fname, (set(), set()))
 
         try:
@@ -694,7 +758,7 @@ def main():
 
     # Cleanup temp
     try:
-        shutil.rmtree(temp_cleaned_dir)
+        shutil.rmtree(".temp_cleaned_pdbs")
     except Exception:
         pass
 
